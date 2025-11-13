@@ -1,0 +1,61 @@
+{
+    "cSpell.ignorePaths": [
+        "**/*.ini"
+    ],
+    "cSpell.words": [
+        "ASYNCCH",
+        "BODCFG",
+        "BODLEVEL",
+        "BUFEN",
+        "BUFWR",
+        "CLKCTRL",
+        "CLKSEL",
+        "CLKSRC",
+        "CTRLA",
+        "CTRLB",
+        "DIRCLR",
+        "DREIE",
+        "DREIF",
+        "EEMEM",
+        "eeprom",
+        "EESAVE",
+        "EVSYS",
+        "EXTCLK",
+        "fclk",
+        "HYSMODE",
+        "INTCTRL",
+        "kbps",
+        "MCLKCTRLA",
+        "MCLKCTRLB",
+        "MSPI",
+        "MUXCTRLA",
+        "MUXPOS",
+        "OUTCLR",
+        "OUTEN",
+        "PORTA",
+        "PORTB",
+        "PORTC",
+        "PORTMUX",
+        "PRESC",
+        "RESRDY",
+        "RXCIF",
+        "sbrs",
+        "SINGLESLOPE",
+        "STCONV",
+        "TXCIE",
+        "TXCIF",
+        "TXDATAL",
+        "TXEN",
+        "USART",
+        "VDDREF",
+        "WDTCFG",
+        "WGMODE",
+        "xmodem"
+    ],
+    "cSpell.enabledFileTypes": {
+        "platformio-debug.asm": false
+    },
+    "files.associations": {
+        "io.h": "c"
+    }
+}
