@@ -57,5 +57,6 @@
     },
     "files.associations": {
         "io.h": "c"
-    }
+    },
+    "git.openRepositoryInParentFolders": "always"
 }

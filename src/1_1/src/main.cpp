@@ -187,8 +187,8 @@ bool read_without_encryption(packet_t command)
     for (int i = 0; i < SERVICE_MAX; i++)
     {
         uint16_t sc = service_code[2 * i] | (service_code[2 * i + 1] << 8);
-        if (sc == 0)
-            break;
+        // if (sc == 0)
+        //     continue;
 
         if (target_service_code == sc)
         {
@@ -236,36 +236,75 @@ bool read_without_encryption(packet_t command)
 
         bool valid_block = false;
 
+        uint8_t *dst = response + 13 + 16 * i;
+
         if (block_num < BLOCK_MAX)
         {
             valid_block = true;
-            eeprom_read_block(response + 13 + 16 * i, block_data_eep + 16 * block_num, 16);
+            eeprom_read_block(dst, block_data_eep + 16 * block_num, 16);
         }
-        if (ERROR_BLOCK <= block_num && block_num < ERROR_BLOCK + LAST_ERROR_SIZE)
+        else if (BLOCK_MAX <= block_num && block_num <= 0xF)
+        {
+            // we don't have space in EEPROM, so all 0 it is!
+            valid_block = true;
+            memset(dst, 0x00, 16);
+        }
+        else if (ERROR_BLOCK <= block_num && block_num < ERROR_BLOCK + LAST_ERROR_SIZE)
         {
             valid_block = true;
-            eeprom_read_block(response + 13 + 16 * i, last_error_eep + (block_num - ERROR_BLOCK) * 16, 16);
+            eeprom_read_block(dst, last_error_eep + (block_num - ERROR_BLOCK) * 16, 16);
         }
-        // D_ID
-        if (n == 1 && block_num == 0x83)
+        else if (0x81 <= block_num && block_num <= 0x92 && block_num != 0x89)
         {
             valid_block = true;
-            memcpy(response + 13, idm, 8);
-            memcpy(response + 21, pmm, 8);
-        }
-        // SER_C
-        if (n == 1 && block_num == 0x84)
-        {
-            valid_block = true;
-            memcpy(response + 13, service_code, 2 * SERVICE_MAX);
-            memset(response + 13 + 2 * SERVICE_MAX, 0x00, 16 - 2 * SERVICE_MAX);
-        }
-        // SYS_C
-        if (n == 1 && block_num == 0x85)
-        {
-            valid_block = true;
-            memcpy(response + 13, system_code, 2 * SYSTEM_MAX);
-            memset(response + 13 + 2 * SYSTEM_MAX, 0x00, 16 - 2 * SYSTEM_MAX);
+            switch (block_num)
+            {
+                case 0x81: // MAC
+                    memset(dst, 0, 16);
+                    break;
+
+                case 0x82: // ID
+                    memcpy(dst, idm, 8);
+                    // Aime Amusement IC DFC
+                    *(dst+8) = 0x00;
+                    *(dst+9) = 0x78;
+                    memset(dst + 10, 0x00, 6);
+                    break;
+
+                case 0x83: // D_ID
+                    memcpy(dst, idm, 8);
+                    memcpy(dst + 8, pmm, 8);
+                    break;
+
+                case 0x84: // SER_C
+                    memcpy(dst, service_code, 2 * SERVICE_MAX);
+                    memset(dst + 2 * SERVICE_MAX, 0x00, 16 - 2 * SERVICE_MAX);
+                    break;
+
+                case 0x85: // SYS_C
+                    memcpy(dst, system_code, 2 * SYSTEM_MAX);
+                    memset(dst + 2 * SYSTEM_MAX, 0x00, 16 - 2 * SYSTEM_MAX);
+                    break;
+
+                case 0x86: // CKV (used in MAC_A authentication)
+                case 0x87: // CK
+                    memset(dst, 0, 16);
+                    break;
+
+                case 0x88: // MC
+                    memset(dst, 0xFF, 3); // access permission
+                    // Since AIC uses 0x00, we can't make NDEF work :(
+                    *(dst + 3) = 0x00; // NDEF compatability
+                    *(dst + 4) = 0xFF; // RF parameter
+                    memset(dst + 5, 0x00, 11); // memory config
+                    break;
+
+                case 0x90: // WCNT (used in MAC_A authentication)
+                case 0x91: // MAC_A
+                case 0x92: // STATE (used in MAC_A authentication)
+                    memset(dst, 0x00, 16);
+                    break;                
+            }
         }
 
         if (!valid_block)
@@ -341,6 +380,31 @@ bool write_without_encryption(packet_t command)
             valid_block = true;
             eeprom_update_block(command + 14 + N + 16 * i, block_data_eep + 16 * block_num, 16);
         }
+        
+        // On Mutual Authentication (refer to Felica Lite-S User Manual 5.4.2)
+        // tl;dr: SEGA game server & card calculate MAC_A based on card-specific shared
+        // key and session-specific random challenge; identical result == legit card
+        // No replay attacks & copying cards
+        // Eavesdropping is possible
+        // "Security by Obsecurity"
+        
+        // In the process, the reader does the following:
+        // - Write to RC (0x80)
+        // - Read ID, WCNT and MAC_A simultaneously
+        // - Write to STATE and MAC_A simultaneously
+        // - Read data blocks and MAC_A simultaneously
+
+        // For bootleg servers: The values don't matter at all, just respond anything
+        // to these commands.
+        // For official servers: Because there is currently no way to acquire the key
+        // used in the MAC_A authentication process, SiliCa and similar emulation devices
+        // will never work properly on SEGA arcades unless the keys were leaked.
+
+        // RC
+        if (block_num == 0x80)
+        {
+            valid_block = true;
+        }
 
         // D_ID
         if (n == 1 && block_num == 0x83)
@@ -372,6 +436,18 @@ bool write_without_encryption(packet_t command)
 
             memcpy(system_code, command + 16, 2 * SYSTEM_MAX);
             eeprom_update_block(system_code, system_code_eep, 2 * SYSTEM_MAX);
+        }
+
+        // STATE
+        if (block_num == 0x90)
+        {
+            valid_block = true;
+        }
+
+        // MAC_A
+        if (block_num == 0x91)
+        {
+            valid_block = true;
         }
 
         if (!valid_block)

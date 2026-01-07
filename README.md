@@ -5,6 +5,12 @@
 
 ![3D View](./img/1_1/3d_view.png)
 
+## About This Fork
+
+This fork of SiliCa modifies the firmware so that the device can be used to emulate Amusement IC cards. It will work on bemani games and most bootleg / private servers for SEGA games, but due to technical limitations it is impossible to be used on legit SEGA arcades connected to official servers.
+
+To emulate an Amusement IC, write the IDm as well as data in SPAD_0 to SiliCa, set the system code to 0x88B4, and set service codes to 0x0000 and 0x000B.
+
 ## 概要
 
 `SiliCa` は、最小限のハードウェア構成で、 `FeliCa` プロトコルをファームウェアによって再現し、`FeliCa Standard` や `FeliCa Lite-S` のエミュレーションを実現することを目的としています。

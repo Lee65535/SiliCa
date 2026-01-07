@@ -32,7 +32,7 @@ def check(tag, timeout=1.0):
 
 
 def main():
-    with nfc.ContactlessFrontend("usb") as clf:
+    with nfc.ContactlessFrontend("tty") as clf:
         print("Waiting for a FeliCa...")
         tag = clf.connect(
             rdwr={"targets": ["212F"], 'on-connect': lambda tag: False})

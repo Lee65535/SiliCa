@@ -128,7 +128,7 @@ def main(argv):
     block_num, data = built
 
     try:
-        with nfc.ContactlessFrontend("usb") as clf:
+        with nfc.ContactlessFrontend("tty") as clf:
             print("Waiting for a FeliCa...")
             tag = clf.connect(
                 rdwr={"targets": ["212F"], 'on-connect': lambda tag: False})
