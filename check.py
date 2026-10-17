@@ -23,12 +23,13 @@ def write_block(tag, block_num, data, timeout=1.0):
 
 
 def check(tag, timeout=1.0):
-    # the test overwrites the card configuration, so restore it afterwards
-    saved = {b: read_block(tag, b, timeout) for b in (D_ID, SER_C, SYS_C)}
+    # the test overwrites the card data and configuration, so restore them afterwards
+    blocks = list(range(MAX_BLOCK)) + [SER_C, SYS_C, D_ID]  # D_ID last: it changes the IDm
+    saved = {b: read_block(tag, b, timeout) for b in blocks}
     try:
         _check(tag, timeout)
     finally:
-        for block_num in (SER_C, SYS_C, D_ID):  # D_ID last: it changes the IDm
+        for block_num in blocks:
             write_block(tag, block_num, saved[block_num], timeout)
 
 

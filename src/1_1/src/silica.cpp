@@ -7,6 +7,7 @@
 #include <util/crc16.h>
 #include <util/delay.h>
 #include "silica.h"
+#include "decode.h"
 
 // data link layer header
 static const uint8_t header[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xB2, 0x4D};
@@ -15,6 +16,28 @@ static const uint8_t header[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xB2, 0x4D}
 static uint8_t rx_buf[0x220] = {};
 static uint8_t command[0x110] = {};
 
+// the decoded frame must fit into the command buffer
+static_assert((sizeof(rx_buf) - 6 + 1) / 2 <= sizeof(command), "command buffer too small");
+
+// Timer value (free running TCB0) when the end of the last frame was seen.
+// Used to make the response timing independent of the processing time.
+static uint16_t frame_end_ticks;
+
+// Time from the end of a Polling command to the start of the response.
+// The original fixed 1.5ms delay after decoding and processing (0.7-0.8ms)
+// gave 2.2-2.3ms. A PN532 reader (HINATA) stops accepting responses starting
+// later than about 2.25ms, so this stays about 0.1ms below that. Responses
+// from 1.6ms to 2.24ms were all accepted. Processing must stay well below
+// this time (0.8ms at the moment).
+static constexpr uint32_t POLLING_RESPONSE_US = 2150;
+static constexpr uint16_t POLLING_RESPONSE_TICKS = (F_CPU / 1000) * POLLING_RESPONSE_US / 1000;
+
+static inline void watchdog_reset()
+{
+    __asm__ __volatile__("wdr");
+}
+
+#ifdef DEBUG_LOG
 // Functions for serial output.
 // These functions perform blocking writes.
 void Serial_write(uint8_t data)
@@ -44,6 +67,7 @@ void Serial_print_hex(uint8_t data)
     Serial_write(digits[data >> 4]);
     Serial_write(digits[data & 0xF]);
 }
+#endif // DEBUG_LOG
 
 // transfer one byte via SPI
 // Arduino SPI.transfer() equivalent
@@ -73,6 +97,7 @@ int capture_frame()
     // wait for start of frame
     for (int i = 0; i < sizeof(rx_buf); i++)
     {
+        watchdog_reset();
         uint8_t data = SPI_transfer();
         rx_buf[i] = data;
 
@@ -87,6 +112,7 @@ int capture_frame()
             }
             else
             {
+                frame_end_ticks = TCB0.CNT;
                 return i + 1;
             }
         }
@@ -95,6 +121,7 @@ int capture_frame()
     return 0;
 }
 
+#ifdef DEBUG_LOG
 // Debug: print captured frame to serial
 void print_frame(int rx_len)
 {
@@ -106,6 +133,7 @@ void print_frame(int rx_len)
     }
     Serial_println("");
 }
+#endif // DEBUG_LOG
 
 // determine bit shift from sync pattern
 // return -1 if not a valid sync pattern
@@ -161,166 +189,16 @@ int find_sync_index(int rx_len, int &shift, bool &invert)
     return -1;
 }
 
-// extract one byte from 3 bytes of received data
-// according to the specified bit shift
-uint8_t extract_byte(int shift, uint8_t data1, uint8_t data2, uint8_t data3)
+// decode the received data into the command buffer
+// the bit shift is a template parameter to get constant shifts
+// return the number of decoded bytes
+template <int shift>
+static int decode_data(int rx_index, int rx_len, uint8_t invert_mask)
 {
-    uint8_t x = 0;
-
-    if (shift == 0)
-    {
-        if (data1 & 0x80)
-            x |= 0x80;
-        if (data1 & 0x20)
-            x |= 0x40;
-        if (data1 & 0x08)
-            x |= 0x20;
-        if (data1 & 0x02)
-            x |= 0x10;
-        if (data2 & 0x80)
-            x |= 0x08;
-        if (data2 & 0x20)
-            x |= 0x04;
-        if (data2 & 0x08)
-            x |= 0x02;
-        if (data2 & 0x02)
-            x |= 0x01;
-    }
-    if (shift == 1)
-    {
-        if (data1 & 0x40)
-            x |= 0x80;
-        if (data1 & 0x10)
-            x |= 0x40;
-        if (data1 & 0x04)
-            x |= 0x20;
-        if (data1 & 0x01)
-            x |= 0x10;
-        if (data2 & 0x40)
-            x |= 0x08;
-        if (data2 & 0x10)
-            x |= 0x04;
-        if (data2 & 0x04)
-            x |= 0x02;
-        if (data2 & 0x01)
-            x |= 0x01;
-    }
-    if (shift == 2)
-    {
-        if (data1 & 0x20)
-            x |= 0x80;
-        if (data1 & 0x08)
-            x |= 0x40;
-        if (data1 & 0x02)
-            x |= 0x20;
-        if (data2 & 0x80)
-            x |= 0x10;
-        if (data2 & 0x20)
-            x |= 0x08;
-        if (data2 & 0x08)
-            x |= 0x04;
-        if (data2 & 0x02)
-            x |= 0x02;
-        if (data3 & 0x80)
-            x |= 0x01;
-    }
-    if (shift == 3)
-    {
-        if (data1 & 0x10)
-            x |= 0x80;
-        if (data1 & 0x04)
-            x |= 0x40;
-        if (data1 & 0x01)
-            x |= 0x20;
-        if (data2 & 0x40)
-            x |= 0x10;
-        if (data2 & 0x10)
-            x |= 0x08;
-        if (data2 & 0x04)
-            x |= 0x04;
-        if (data2 & 0x01)
-            x |= 0x02;
-        if (data3 & 0x40)
-            x |= 0x01;
-    }
-    if (shift == 4)
-    {
-        if (data1 & 0x08)
-            x |= 0x80;
-        if (data1 & 0x02)
-            x |= 0x40;
-        if (data2 & 0x80)
-            x |= 0x20;
-        if (data2 & 0x20)
-            x |= 0x10;
-        if (data2 & 0x08)
-            x |= 0x08;
-        if (data2 & 0x02)
-            x |= 0x04;
-        if (data3 & 0x80)
-            x |= 0x02;
-        if (data3 & 0x20)
-            x |= 0x01;
-    }
-    if (shift == 5)
-    {
-        if (data1 & 0x04)
-            x |= 0x80;
-        if (data1 & 0x01)
-            x |= 0x40;
-        if (data2 & 0x40)
-            x |= 0x20;
-        if (data2 & 0x10)
-            x |= 0x10;
-        if (data2 & 0x04)
-            x |= 0x08;
-        if (data2 & 0x01)
-            x |= 0x04;
-        if (data3 & 0x40)
-            x |= 0x02;
-        if (data3 & 0x10)
-            x |= 0x01;
-    }
-    if (shift == 6)
-    {
-        if (data1 & 0x02)
-            x |= 0x80;
-        if (data2 & 0x80)
-            x |= 0x40;
-        if (data2 & 0x20)
-            x |= 0x20;
-        if (data2 & 0x08)
-            x |= 0x10;
-        if (data2 & 0x02)
-            x |= 0x08;
-        if (data3 & 0x80)
-            x |= 0x04;
-        if (data3 & 0x20)
-            x |= 0x02;
-        if (data3 & 0x08)
-            x |= 0x01;
-    }
-    if (shift == 7)
-    {
-        if (data1 & 0x01)
-            x |= 0x80;
-        if (data2 & 0x40)
-            x |= 0x40;
-        if (data2 & 0x10)
-            x |= 0x20;
-        if (data2 & 0x04)
-            x |= 0x10;
-        if (data2 & 0x01)
-            x |= 0x08;
-        if (data3 & 0x40)
-            x |= 0x04;
-        if (data3 & 0x10)
-            x |= 0x02;
-        if (data3 & 0x04)
-            x |= 0x01;
-    }
-
-    return x;
+    int index = 0;
+    for (int i = rx_index; i < rx_len - 2; i += 2)
+        command[index++] = extract_byte_s<shift>(rx_buf[i], rx_buf[i + 1], rx_buf[i + 2]) ^ invert_mask;
+    return index;
 }
 
 // receive command packet from the reader
@@ -331,7 +209,7 @@ packet_t receive_command()
     int rx_len = capture_frame();
     if (rx_len == 0)
     {
-        Serial_println("Frame capture error");
+        LOG("Frame capture error");
         return nullptr;
     }
 
@@ -341,7 +219,7 @@ packet_t receive_command()
     int rx_index = find_sync_index(rx_len, shift, invert);
     if (rx_index == -1)
     {
-        Serial_println("Sync error");
+        LOG("Sync error");
         return nullptr;
     }
 
@@ -349,22 +227,25 @@ packet_t receive_command()
     rx_index += 4;
 
     // decode data
-    int index = 0;
-    for (int i = rx_index; i < rx_len - 2; i += 2)
+    const uint8_t invert_mask = invert ? 0xFF : 0x00;
+    int index;
+    switch (shift)
     {
-        uint8_t x = extract_byte(shift, rx_buf[i], rx_buf[i + 1], rx_buf[i + 2]);
-
-        if (invert)
-            x = ~x;
-
-        command[index++] = x;
+    case 0: index = decode_data<0>(rx_index, rx_len, invert_mask); break;
+    case 1: index = decode_data<1>(rx_index, rx_len, invert_mask); break;
+    case 2: index = decode_data<2>(rx_index, rx_len, invert_mask); break;
+    case 3: index = decode_data<3>(rx_index, rx_len, invert_mask); break;
+    case 4: index = decode_data<4>(rx_index, rx_len, invert_mask); break;
+    case 5: index = decode_data<5>(rx_index, rx_len, invert_mask); break;
+    case 6: index = decode_data<6>(rx_index, rx_len, invert_mask); break;
+    default: index = decode_data<7>(rx_index, rx_len, invert_mask); break;
     }
 
     // verify length
     int len = command[0];
     if (len + 2 > index)
     {
-        Serial_println("Length error");
+        LOG("Length error");
         return nullptr;
     }
 
@@ -378,7 +259,7 @@ packet_t receive_command()
     }
     else
     {
-        Serial_println("EDC error");
+        LOG("EDC error");
         return nullptr;
     }
 
@@ -488,20 +369,31 @@ void setup()
     CCL.TRUTH1 = 0xAA;
     CCL.LUT1CTRLA = CCL_CLKSRC_bm | CCL_FILTSEL0_bm | CCL_OUTEN_bm | CCL_ENABLE_bm;
 
+#ifdef DEBUG_LOG
     // set up USART for serial output
     PORTMUX.CTRLB |= PORTMUX_USART0_ALTERNATE_gc;
     PORTA.OUTSET = PIN1_bm;
     PORTA.DIRSET = PIN1_bm;
     USART0.BAUD = 118; // 115200bps
     USART0.CTRLB = USART_TXEN_bm;
+#endif
+
+    // free running 16 bit timer at fclk, used to time the response
+    TCB0.CCMP = 0xFFFF;
+    TCB0.CTRLA = TCB_ENABLE_bm;
 
     // application layer initialization
     initialize();
 
+#ifdef DEBUG_LOG
     // print version info
-    Serial_println("SiliCa v1.1");
+    Serial_println("SiliCa v1.1 (debug)");
     Serial_print("Build on: ");
     Serial_println(__DATE__);
+#endif
+
+    // reset the MCU if the main loop stalls for about a second
+    WDT.CTRLA = WDT_PERIOD_1KCLK_gc;
 }
 
 // test response for debugging
@@ -520,6 +412,8 @@ void test_response()
 // process commands continuously
 void loop()
 {
+    watchdog_reset();
+
     packet_t command = receive_command();
     if (command == nullptr)
         return;
@@ -528,10 +422,14 @@ void loop()
     if (response == nullptr)
         return;
 
-    // delay for Polling command
-    // 1000us + 1500us = 2.5ms
+    // Polling responses are sent at a fixed time after the end of the command
     if (command[1] == 0x00)
-        _delay_us(1500);
+    {
+        while ((uint16_t)(TCB0.CNT - frame_end_ticks) < POLLING_RESPONSE_TICKS)
+        {
+            // do nothing
+        }
+    }
 
     send_response(response);
 }

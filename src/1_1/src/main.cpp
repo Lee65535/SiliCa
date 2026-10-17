@@ -15,29 +15,44 @@ constexpr int LAST_ERROR_SIZE = 2;
 static uint8_t idm[8];
 static uint8_t pmm[8];
 
-static uint8_t EEMEM idm_eep[8];
-static uint8_t EEMEM pmm_eep[8];
 
 static uint8_t service_code[2 * SERVICE_MAX];
 static uint8_t system_code[2 * SYSTEM_MAX];
 
-static uint8_t EEMEM service_code_eep[2 * SERVICE_MAX];
-static uint8_t EEMEM system_code_eep[2 * SYSTEM_MAX];
 
-static uint8_t EEMEM block_data_eep[16 * BLOCK_MAX];
 
 static const int ERROR_BLOCK = 0xE0;
-static uint8_t EEMEM last_error_eep[16 * LAST_ERROR_SIZE];
+
+// Layout of the EEPROM.
+// The addresses of separate EEMEM variables are chosen by the compiler and
+// change between builds, which would scramble the data of cards programmed
+// with another firmware. A single struct keeps the layout fixed. Do not
+// reorder or resize the members.
+struct EepromLayout
+{
+    uint8_t system_code[2 * SYSTEM_MAX];     // 0x00
+    uint8_t service_code[2 * SERVICE_MAX];   // 0x08
+    uint8_t pmm[8];                          // 0x10
+    uint8_t idm[8];                          // 0x18
+    uint8_t block_data[16 * BLOCK_MAX];      // 0x20
+    uint8_t last_error[16 * LAST_ERROR_SIZE]; // 0xE0
+};
+static_assert(sizeof(EepromLayout) == 0x100, "unexpected EEPROM layout");
+static_assert(offsetof(EepromLayout, system_code) == 0x00 && offsetof(EepromLayout, idm) == 0x18 &&
+                  offsetof(EepromLayout, block_data) == 0x20 && offsetof(EepromLayout, last_error) == 0xE0,
+              "unexpected EEPROM layout");
+
+static EepromLayout EEMEM eeprom_layout;
 
 static uint8_t response[0xFF] = {};
 
 void initialize()
 {
     // read parameters from EEPROM
-    eeprom_read_block(idm, idm_eep, 8);
-    eeprom_read_block(pmm, pmm_eep, 8);
-    eeprom_read_block(service_code, service_code_eep, 2 * SERVICE_MAX);
-    eeprom_read_block(system_code, system_code_eep, 2 * SYSTEM_MAX);
+    eeprom_read_block(idm, eeprom_layout.idm, 8);
+    eeprom_read_block(pmm, eeprom_layout.pmm, 8);
+    eeprom_read_block(service_code, eeprom_layout.service_code, 2 * SERVICE_MAX);
+    eeprom_read_block(system_code, eeprom_layout.system_code, 2 * SYSTEM_MAX);
 }
 
 bool polling(packet_t command)
@@ -261,7 +276,7 @@ bool read_without_encryption(packet_t command)
         if (block_num < BLOCK_MAX)
         {
             valid_block = true;
-            eeprom_read_block(dst, block_data_eep + 16 * block_num, 16);
+            eeprom_read_block(dst, eeprom_layout.block_data + 16 * block_num, 16);
         }
         else if (BLOCK_MAX <= block_num && block_num <= 0xF)
         {
@@ -272,7 +287,7 @@ bool read_without_encryption(packet_t command)
         else if (ERROR_BLOCK <= block_num && block_num < ERROR_BLOCK + LAST_ERROR_SIZE)
         {
             valid_block = true;
-            eeprom_read_block(dst, last_error_eep + (block_num - ERROR_BLOCK) * 16, 16);
+            eeprom_read_block(dst, eeprom_layout.last_error + (block_num - ERROR_BLOCK) * 16, 16);
         }
         else
         {
@@ -404,7 +419,7 @@ bool write_without_encryption(packet_t command)
         if (block_num < BLOCK_MAX)
         {
             valid_block = true;
-            eeprom_update_block(data, block_data_eep + 16 * block_num, 16);
+            eeprom_update_block(data, eeprom_layout.block_data + 16 * block_num, 16);
         }
         else if (block_num <= 0xF)
         {
@@ -444,11 +459,11 @@ bool write_without_encryption(packet_t command)
 
             // Update IDm
             memcpy(idm, data, 8);
-            eeprom_update_block(idm, idm_eep, 8);
+            eeprom_update_block(idm, eeprom_layout.idm, 8);
 
             // Update PMm
             memcpy(pmm, data + 8, 8);
-            eeprom_update_block(pmm, pmm_eep, 8);
+            eeprom_update_block(pmm, eeprom_layout.pmm, 8);
         }
 
         // SER_C
@@ -457,7 +472,7 @@ bool write_without_encryption(packet_t command)
             valid_block = true;
 
             memcpy(service_code, data, 2 * SERVICE_MAX);
-            eeprom_update_block(service_code, service_code_eep, 2 * SERVICE_MAX);
+            eeprom_update_block(service_code, eeprom_layout.service_code, 2 * SERVICE_MAX);
         }
 
         // SYS_C
@@ -466,7 +481,7 @@ bool write_without_encryption(packet_t command)
             valid_block = true;
 
             memcpy(system_code, data, 2 * SYSTEM_MAX);
-            eeprom_update_block(system_code, system_code_eep, 2 * SYSTEM_MAX);
+            eeprom_update_block(system_code, eeprom_layout.system_code, 2 * SYSTEM_MAX);
         }
 
         // STATE (0x92). 0x90 (WCNT) is also accepted and ignored, as before.
@@ -607,9 +622,8 @@ packet_t process(packet_t command)
         // status flag 1
         if (response[10] != 0x00)
         {
-            save_error(command);
-            Serial_println("Read failed");
-            print_packet(command);
+            LOG("Read failed");
+            LOG_PACKET(command);
         }
         break;
     case 0x08: // Write Without Encryption
@@ -636,26 +650,23 @@ packet_t process(packet_t command)
     case 0x10: // Authentication1
     // pass through for unsupported commands
     default:
-        // Only commands addressed to this card are logged. Saving to EEPROM
-        // and printing take milliseconds, so doing so for unrelated traffic
-        // (e.g. polling for other systems) would wear the EEPROM and make
-        // the card miss the next command.
-        Serial_println("Unsupported command");
-        save_error(command);
-        print_packet(command);
+        // Only commands addressed to this card are logged, see silica.h.
+        LOG("Unsupported command");
+        LOG_PACKET(command);
         return nullptr;
     }
 
     return response;
 }
 
+#ifdef DEBUG_LOG
 void save_error(packet_t command)
 {
     size_t len = command[0];
-    if (len > sizeof(last_error_eep))
-        len = sizeof(last_error_eep);
+    if (len > sizeof(eeprom_layout.last_error))
+        len = sizeof(eeprom_layout.last_error);
 
-    eeprom_update_block(command, last_error_eep, len);
+    eeprom_update_block(command, eeprom_layout.last_error, len);
 }
 
 // Debug: print packet to serial
@@ -676,3 +687,4 @@ void print_packet(packet_t packet)
     }
     Serial_println("");
 }
+#endif // DEBUG_LOG
