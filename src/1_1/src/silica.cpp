@@ -1,7 +1,6 @@
 // Implementation of the physical and data link layers for
 // JIS X 6319-4 compatible card "SiliCa"
 
-#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <avr/io.h>
@@ -37,6 +36,13 @@ void Serial_println(const char *str)
 {
     Serial_print(str);
     Serial_print("\r\n");
+}
+
+void Serial_print_hex(uint8_t data)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    Serial_write(digits[data >> 4]);
+    Serial_write(digits[data & 0xF]);
 }
 
 // transfer one byte via SPI
@@ -94,9 +100,7 @@ void print_frame(int rx_len)
 {
     for (int i = 0; i < rx_len; i++)
     {
-        char hex_str[5];
-        sprintf(hex_str, "%02X", rx_buf[i]);
-        Serial_print(hex_str);
+        Serial_print_hex(rx_buf[i]);
         if (i != rx_len - 1)
             Serial_print(" ");
     }
@@ -522,12 +526,7 @@ void loop()
 
     packet_t response = process(command);
     if (response == nullptr)
-    {
-        Serial_println("Unsupported command");
-        save_error(command);
-        print_packet(command);
         return;
-    }
 
     // delay for Polling command
     // 1000us + 1500us = 2.5ms

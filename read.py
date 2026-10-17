@@ -12,14 +12,17 @@ def read_block(tag, block_num, timeout=1.0) -> bytes:
     return tag.send_cmd_recv_rsp(COMMAND_READ, bytes(cmd_data), timeout)[1:]
 
 def main(argv):
-    if len(argv) >= 4:
-        print(f'Usage: {argv[0]} err | block_num_hex')
+    if len(argv) < 2 or len(argv) > 3:
+        print(f'Usage: {argv[0]} err | dfc | mac block_num_hex | block_num_hex')
         return 1
 
     with nfc.ContactlessFrontend("tty") as clf:
         print("Waiting for a FeliCa...")
         tag = clf.connect(
             rdwr={"targets": ["212F"], 'on-connect': lambda tag: False})
+        if tag is None:
+            print("No tag found")
+            return 1
         print("Tag found:", tag)
 
         if (argv[1] == 'err'):

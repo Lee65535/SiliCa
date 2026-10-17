@@ -10,6 +10,7 @@ typedef const uint8_t *packet_t;
 void Serial_write(uint8_t);
 void Serial_print(const char *);
 void Serial_println(const char *);
+void Serial_print_hex(uint8_t); // two uppercase hex digits
 
 // application layer functions
 void initialize();

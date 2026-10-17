@@ -9,7 +9,7 @@
 # python write.py ser 123B
 # python write.py ser 100B 200B 300B
 # python write.py 0 00112233445566778899AABBCCDDEEFF
-# python write.py 3 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+# python write.py B FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF   (block number is hex)
 
 from typing import Optional
 import sys
@@ -20,6 +20,7 @@ COMMAND_WRITE = 0x08
 DEFAULT_PMM = bytes.fromhex("0001FFFFFFFFFFFF")  # 8 bytes
 MAX_SYSTEM = 4
 MAX_SERVICE = 4
+MAX_BLOCK = 12
 
 
 def write_system_block(tag: nfc.tag.Tag, block_num: int, data: bytes, timeout: float = 1.0) -> None:
@@ -55,10 +56,11 @@ def build_data_for_command(command: str, param: bytes) -> Optional[tuple[int, by
     """
     Returns (block_num, data) or None for unknown command / validation failure.
     """
-    if command.isdigit():
-        block = int(command)
-        if not (0 <= block < 12):
-            print("Block number must be between 0 and 11")
+    # raw block number in hex (same convention as read.py)
+    if all(c in "0123456789abcdef" for c in command) and not command.startswith(("idm", "sys", "ser")):
+        block = int(command, 16)
+        if not (0 <= block < MAX_BLOCK):
+            print(f"Block number must be between 0 and {MAX_BLOCK - 1:X} (hex)")
             return None
         if len(param) != 16:
             print("Data must be exactly 16 bytes for raw write")

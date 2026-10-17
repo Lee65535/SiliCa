@@ -10,7 +10,29 @@ SER_C = 0x84
 SYS_C = 0x85
 
 
+def read_block(tag, block_num, timeout=1.0):
+    cmd_read = bytearray([1, 0xFF, 0xFF, 1, 0x80, block_num])
+    return tag.send_cmd_recv_rsp(COMMAND_READ, bytes(cmd_read), timeout)[1:]
+
+
+def write_block(tag, block_num, data, timeout=1.0):
+    cmd_write = bytearray([1, 0xFF, 0xFF, 1, 0x80, block_num]) + data
+    tag.send_cmd_recv_rsp(COMMAND_WRITE, bytes(cmd_write), timeout)
+    if block_num == D_ID:  # Update IDm if written
+        tag.idm = data[0:8]
+
+
 def check(tag, timeout=1.0):
+    # the test overwrites the card configuration, so restore it afterwards
+    saved = {b: read_block(tag, b, timeout) for b in (D_ID, SER_C, SYS_C)}
+    try:
+        _check(tag, timeout)
+    finally:
+        for block_num in (SER_C, SYS_C, D_ID):  # D_ID last: it changes the IDm
+            write_block(tag, block_num, saved[block_num], timeout)
+
+
+def _check(tag, timeout=1.0):
     for block_num in list(range(MAX_BLOCK)) + [D_ID, SER_C, SYS_C]:
         data = random.randbytes(16)
         cmd_write = bytearray([1, 0xFF, 0xFF, 1, 0x80, block_num]) + data

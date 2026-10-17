@@ -1,7 +1,7 @@
 // Implementation of the application layer for
 // JIS X 6319-4 compatible card "SiliCa"
 
-#include <stdio.h>
+#include <stddef.h>
 #include <string.h>
 #include <avr/eeprom.h>
 #include "silica.h"
@@ -42,6 +42,10 @@ void initialize()
 
 bool polling(packet_t command)
 {
+    // LEN, command code, system code (2), request code, time slot
+    if (command[0] < 6)
+        return false;
+
     // find system code
     int system_index = -1;
     for (int i = 0; i < SYSTEM_MAX; i++)
@@ -69,19 +73,18 @@ bool polling(packet_t command)
         return false;
 
     uint8_t request_code = command[4];
+    if (request_code > 0x02)
+        return false;
+
     if (request_code == 0x00)
         response[0] = 18;
     else
         response[0] = 20;
 
-    if (request_code > 0x02)
-        return false;
-
     // response code
     response[1] = 0x01;
 
     // time slot (unused)
-    int n = command[5];
 
     memcpy(response + 2, idm, 8);
     memcpy(response + 10, pmm, 8);
@@ -117,6 +120,10 @@ bool request_service(packet_t command)
     if (!(1 <= n && n <= 32))
         return false;
 
+    // the command must contain all n node codes
+    if (command[0] < 11 + 2 * n)
+        return false;
+
     response[0] = 11 + 2 * n;
 
     response[10] = n;
@@ -131,11 +138,24 @@ bool request_service(packet_t command)
     return true;
 }
 
-int parse_block_list(int n, const uint8_t *block_list, uint8_t *block_nums)
+// set the status flags of an error (or success) response
+static void set_status(uint8_t flag1, uint8_t flag2)
+{
+    response[0] = 12; // length
+    response[10] = flag1;
+    response[11] = flag2;
+}
+
+// Parse a block list of n elements, available bytes at most max_size.
+// Returns the size of the block list, or 0 if it is malformed.
+int parse_block_list(int n, const uint8_t *block_list, int max_size, uint8_t *block_nums)
 {
     int j = 0;
     for (int i = 0; i < n; i++)
     {
+        if (j + 2 > max_size)
+            return 0;
+
         if (block_list[j] == 0x80)
         {
             // 2-byte block list element
@@ -145,7 +165,7 @@ int parse_block_list(int n, const uint8_t *block_list, uint8_t *block_nums)
         else if (block_list[j] == 0x00)
         {
             // 3-byte block list element
-            if (block_list[j + 2] != 0x00)
+            if (j + 3 > max_size || block_list[j + 2] != 0x00)
                 return 0;
             block_nums[i] = block_list[j + 1];
             j += 3;
@@ -221,7 +241,7 @@ bool read_without_encryption(packet_t command)
     }
 
     uint8_t block_nums[BLOCK_MAX];
-    if (parse_block_list(n, command + 14, block_nums) == 0)
+    if (parse_block_list(n, command + 14, command[0] - 14, block_nums) == 0)
     {
         response[0] = 12;    // length
         response[10] = 0xFF; // status flag 1
@@ -254,7 +274,7 @@ bool read_without_encryption(packet_t command)
             valid_block = true;
             eeprom_read_block(dst, last_error_eep + (block_num - ERROR_BLOCK) * 16, 16);
         }
-        else if (0x81 <= block_num && block_num <= 0x92 && block_num != 0x89)
+        else
         {
             valid_block = true;
             switch (block_num)
@@ -303,15 +323,18 @@ bool read_without_encryption(packet_t command)
                 case 0x91: // MAC_A
                 case 0x92: // STATE (used in MAC_A authentication)
                     memset(dst, 0x00, 16);
-                    break;                
+                    break;
+
+                default: // 0x80 (RC), 0x89-0x8F and others are not readable
+                    valid_block = false;
+                    break;
             }
         }
 
         if (!valid_block)
         {
-            response[0] = 12;    // length
-            response[10] = 0xFF; // status flag 1
-            response[11] = 0xA8; // status flag 2
+            // status flag 1 indicates the position of the invalid block
+            set_status(i < 8 ? (1 << i) : 0xFF, 0xA8);
             return true;
         }
     }
@@ -329,12 +352,12 @@ bool read_without_encryption(packet_t command)
 bool write_without_encryption(packet_t command)
 {
     int len = command[0];
-    int m = command[10]; // number of services
-    uint16_t target_service_code = command[11] | (command[12] << 8);
-    int n = command[13]; // number of blocks
 
     if (len < 32)
         return false;
+
+    int m = command[10]; // number of services
+    int n = command[13]; // number of blocks
 
     if (m != 1)
     {
@@ -354,7 +377,7 @@ bool write_without_encryption(packet_t command)
     }
 
     uint8_t block_nums[BLOCK_MAX];
-    int N = parse_block_list(n, command + 14, block_nums);
+    int N = parse_block_list(n, command + 14, len - 14, block_nums);
 
     if (N == 0)
     {
@@ -375,12 +398,20 @@ bool write_without_encryption(packet_t command)
 
         bool valid_block = false;
 
+        // block data follows the block list
+        const uint8_t *data = command + 14 + N + 16 * i;
+
         if (block_num < BLOCK_MAX)
         {
             valid_block = true;
-            eeprom_update_block(command + 14 + N + 16 * i, block_data_eep + 16 * block_num, 16);
+            eeprom_update_block(data, block_data_eep + 16 * block_num, 16);
         }
-        
+        else if (block_num <= 0xF)
+        {
+            // reads of these blocks return all 0, so accept and discard writes
+            valid_block = true;
+        }
+
         // On Mutual Authentication (refer to Felica Lite-S User Manual 5.4.2)
         // tl;dr: SEGA game server & card calculate MAC_A based on card-specific shared
         // key and session-specific random challenge; identical result == legit card
@@ -412,11 +443,11 @@ bool write_without_encryption(packet_t command)
             valid_block = true;
 
             // Update IDm
-            memcpy(idm, command + 16, 8);
+            memcpy(idm, data, 8);
             eeprom_update_block(idm, idm_eep, 8);
 
             // Update PMm
-            memcpy(pmm, command + 24, 8);
+            memcpy(pmm, data + 8, 8);
             eeprom_update_block(pmm, pmm_eep, 8);
         }
 
@@ -425,7 +456,7 @@ bool write_without_encryption(packet_t command)
         {
             valid_block = true;
 
-            memcpy(service_code, command + 16, 2 * SERVICE_MAX);
+            memcpy(service_code, data, 2 * SERVICE_MAX);
             eeprom_update_block(service_code, service_code_eep, 2 * SERVICE_MAX);
         }
 
@@ -434,12 +465,12 @@ bool write_without_encryption(packet_t command)
         {
             valid_block = true;
 
-            memcpy(system_code, command + 16, 2 * SYSTEM_MAX);
+            memcpy(system_code, data, 2 * SYSTEM_MAX);
             eeprom_update_block(system_code, system_code_eep, 2 * SYSTEM_MAX);
         }
 
-        // STATE
-        if (block_num == 0x90)
+        // STATE (0x92). 0x90 (WCNT) is also accepted and ignored, as before.
+        if (block_num == 0x92 || block_num == 0x90)
         {
             valid_block = true;
         }
@@ -452,9 +483,8 @@ bool write_without_encryption(packet_t command)
 
         if (!valid_block)
         {
-            response[0] = 12;    // length
-            response[10] = 0xFF; // status flag 1
-            response[11] = 0xA8; // status flag 2
+            // status flag 1 indicates the position of the invalid block
+            set_status(i < 8 ? (1 << i) : 0xFF, 0xA8);
             return true;
         }
     }
@@ -606,6 +636,13 @@ packet_t process(packet_t command)
     case 0x10: // Authentication1
     // pass through for unsupported commands
     default:
+        // Only commands addressed to this card are logged. Saving to EEPROM
+        // and printing take milliseconds, so doing so for unrelated traffic
+        // (e.g. polling for other systems) would wear the EEPROM and make
+        // the card miss the next command.
+        Serial_println("Unsupported command");
+        save_error(command);
+        print_packet(command);
         return nullptr;
     }
 
@@ -614,7 +651,7 @@ packet_t process(packet_t command)
 
 void save_error(packet_t command)
 {
-    int len = command[0];
+    size_t len = command[0];
     if (len > sizeof(last_error_eep))
         len = sizeof(last_error_eep);
 
@@ -633,9 +670,7 @@ void print_packet(packet_t packet)
 
     for (int i = 1; i < len; i++)
     {
-        char hex_str[5];
-        sprintf(hex_str, "%02X", packet[i]);
-        Serial_print(hex_str);
+        Serial_print_hex(packet[i]);
         if (i != len - 1)
             Serial_print(" ");
     }
