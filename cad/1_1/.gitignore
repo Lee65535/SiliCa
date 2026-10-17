@@ -1,2 +1,4 @@
 *-backups/
 *-cache
+gerber/
+3dmodels/*.wrl
